@@ -1,0 +1,5 @@
+[1] https://www.hackster.io/SurtrTech/bmp280-measure-temperature-pressure-and-altitude-e1c857
+[2] https://electronoobs.com/eng_robotica_tut9_2_2.php
+[3] https://docs.espressif.com/projects/espressif-esp-drone/en/latest/gettingstarted.html
+[4] https://youtu.be/dMRDzicSvXk?si=LSDi5mkgHMitzkxS
+[5] https://www.youtube.com/watch?v=Sa6EslOHsI0&t=210s
