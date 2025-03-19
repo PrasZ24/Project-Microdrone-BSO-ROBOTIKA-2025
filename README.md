@@ -1,3 +1,5 @@
+![alt text](https://github.com/PrasZ24/Project-Microdrone-BSO-ROBOTIKA-2025/blob/main/src/img/hassun%201.jpg?raw=true)
+
 ## Project-Microdrone-BSO-ROBOTIKA-2025
 # Microdrone project by Research And Development BSO ROBOTIKA UIN Sunan Gunung Djati Bandung
 Team list :
