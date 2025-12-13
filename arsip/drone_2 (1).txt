@@ -1,0 +1,206 @@
+#include <MPU6050_light.h>
+#include <PID_v1.h>
+#include <pid_tuner.h>
+
+pid_tuner tuner;
+MPU6050 sensor_mpu(Wire);
+double angleX = 0;
+double pitchOut = 0;
+double error_pitch, prevError_pitch = 0;
+double integral_pitch_raw;
+double integral_pitch, derivative_pitch, proportional_pitch = 0;
+double kp_pitch, ki_pitch, kd_pitch = 0;
+unsigned long lastTimePitch;
+float deriv_filtered_pitch = 0;  // filter D-term
+float tau_pitch = 0.07;          // time constant filter D (20 ms)
+
+double angleY = 0;
+double rollOut = 0;
+double setPoint = 0;
+double error_roll, prevError_roll = 0;
+double integral;
+double integral_roll, derivative_roll, proportional_roll = 0;
+double kp_roll, ki_roll, kd_roll = 0;
+double pwm_1, pwm_2, pwm_3, pwm_4 = 0;
+int throttle = 0;
+unsigned long lastTime;
+float sampleTime = 0.005;
+float deriv_filtered_roll = 0;  // filter D-term
+float tau_roll = 0.07;          // time constant filter D (20 ms)
+double integral_limit = 30;
+
+unsigned long lastSend = 0;
+unsigned long interval = 220;  // kirim tiap 200ms
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("test");
+
+  tuner.begin();
+  mpuSetup();
+  pidSetup();
+  motorSetup();
+}
+
+void loop() {
+  bacaSensor();
+  kirim_terimaData();
+  hitungPIDRoll(sensor_mpu.getGyroX());
+  hitungPIDPitch(sensor_mpu.getGyroY());
+  motorControl();
+  // motorTest();
+}
+
+void mpuSetup() {
+  Wire.begin(7, 6);
+  sensor_mpu.begin(1, 3);
+  sensor_mpu.upsideDownMounting = true;
+  sensor_mpu.setFilterGyroCoef(0.90);
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1A);
+  Wire.write(0x05);
+  Wire.endTransmission();
+  delay(1000);
+  sensor_mpu.calcOffsets();
+}
+
+void motorSetup() {
+  ledcSetup(1, 1500, 8);
+  ledcSetup(2, 1500, 8);
+  ledcSetup(3, 1500, 8);
+  ledcSetup(4, 1500, 8);
+
+  ledcAttachPin(1, 1);
+  ledcAttachPin(2, 2);
+  ledcAttachPin(3, 3);
+  ledcAttachPin(4, 4);
+}
+void pidSetup() {
+  lastTime = millis();
+}
+
+void bacaSensor() {
+  sensor_mpu.update();
+  angleY = -sensor_mpu.getAngleY();
+  angleX = -sensor_mpu.getAngleX();
+}
+
+void motorControl() {
+  pwm_1 = constrain(throttle - rollOut, 0, 255);
+  pwm_2 = constrain(throttle + pitchOut, 0, 255);
+  pwm_3 = constrain(throttle + rollOut, 0, 255);
+  pwm_4 = constrain(throttle - pitchOut, 0, 255);
+
+  ledcWrite(1, pwm_1);  // Motor kanan (Right)
+  ledcWrite(2, pwm_2);  // Motor kanan (Atas)
+  ledcWrite(3, pwm_3);  // Motor kiri (Left)
+  ledcWrite(4, pwm_4);  // Motor kanan (Bawah)
+}
+
+void motorTest() {
+  ledcWrite(1, 200);  // Motor kanan (Right)
+  ledcWrite(3, 200);  // Motor kiri (Left)
+}
+
+void kirim_terimaData() {
+  if (millis() - lastSend > interval) {
+    tuner.sendAngle_roll(angleY);
+    tuner.sendAngle_pitch(angleX);
+    tuner.sendPWM_1(pwm_1);
+    tuner.sendPWM_2(pwm_2);
+    tuner.sendPWM_3(pwm_3);
+    tuner.sendPWM_4(pwm_4);
+    tuner.sendOutRoll_p(proportional_roll);
+    tuner.sendOutRoll_i(integral_roll);
+    tuner.sendOutRoll_d(derivative_roll);
+
+    tuner.sendOutPitch_p(proportional_pitch);
+    tuner.sendOutPitch_i(integral_pitch);
+    tuner.sendOutPitch_d(derivative_pitch);
+    throttle = tuner.getThrottle();
+    kp_roll = tuner.getRollP();
+    ki_roll = tuner.getRollI();
+    kd_roll = tuner.getRollD();
+
+    kp_pitch = tuner.getPitchP();
+    ki_pitch = tuner.getPitchI();
+    kd_pitch = tuner.getPitchD();
+    lastSend = millis();
+  }
+}
+
+void hitungPIDRoll(float gyroX) {
+  unsigned long now = millis();
+  float deltaTime = (now - lastTime) / 1000.0;
+
+  if (deltaTime >= sampleTime) {
+    // 1. Error
+    error_roll = setPoint - angleY;
+
+    // 2. P-term
+    proportional_roll = kp_roll * error_roll;
+
+    // 3. I-term dengan anti-windup
+    if (abs(error_roll) < 40 && abs(rollOut) < 100) {
+      integral += error_roll * deltaTime;
+    }
+    if (integral_roll > integral_limit) integral_roll = integral_limit;
+    if (integral_roll < -integral_limit) integral_roll = -integral_limit;
+    integral_roll = ki_roll * integral;
+
+    // 4. D-term dari gyro + filter low-pass
+    float deriv_raw = -gyroX;  // minus supaya arah koreksi benar
+    float alpha = tau_roll / (tau_roll + deltaTime);
+    deriv_filtered_roll = alpha * deriv_filtered_roll + (1.0 - alpha) * deriv_raw;
+    derivative_roll = kd_roll * (deriv_filtered_roll);
+
+    // 5. Hitung output total
+    rollOut = proportional_roll + integral_roll + derivative_roll;
+
+    // 6. Batas output
+    if (rollOut > 100) rollOut = 100;
+    if (rollOut < -100) rollOut = -100;
+
+    // 7. Simpan waktu terakhir
+    lastTime = now;
+  }
+}
+
+void hitungPIDPitch(float gyroY) {
+  unsigned long now = millis();
+  float deltaTime = (now - lastTimePitch) / 1000.0;
+
+  if (deltaTime >= sampleTime) {
+    // 1. Error
+    error_pitch = setPoint - angleX;
+
+    // 2. P-term
+    proportional_pitch = kp_pitch * error_pitch;
+
+    // 3. I-term dengan anti-windup
+    if (abs(error_pitch) < 40 && abs(pitchOut) < 100) {
+      integral_pitch_raw += error_pitch * deltaTime;
+    }
+    // Batasi integral (anti-windup)
+    if (integral_pitch_raw > integral_limit) integral_pitch_raw = integral_limit;
+    if (integral_pitch_raw < -integral_limit) integral_pitch_raw = -integral_limit;
+
+    integral_pitch = ki_pitch * integral_pitch_raw;
+
+    // 4. D-term dari gyro + filter low-pass
+    float deriv_raw = -gyroY;  // minus supaya arah koreksi benar
+    float alpha = tau_pitch / (tau_pitch + deltaTime);
+    deriv_filtered_pitch = alpha * deriv_filtered_pitch + (1.0 - alpha) * deriv_raw;
+    derivative_pitch = kd_pitch * deriv_filtered_pitch;
+
+    // 5. Hitung output total
+    pitchOut = proportional_pitch + integral_pitch + derivative_pitch;
+
+    // 6. Batas output
+    if (pitchOut > 100) pitchOut = 100;
+    if (pitchOut < -100) pitchOut = -100;
+
+    // 7. Simpan waktu terakhir
+    lastTimePitch = now;
+  }
+}
