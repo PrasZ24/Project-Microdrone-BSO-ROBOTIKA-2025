@@ -1,0 +1,329 @@
+#include <MPU6050_light.h>
+#include <PID_v1.h>
+#include <pid_tuner.h>
+
+pid_tuner tuner;
+MPU6050 sensor_mpu(Wire);
+
+// ===== Trim =====
+double u1 = 0;
+double u2 = 10;
+double u3 = 10;
+double u4 = 0;
+int batas = 0;
+
+// ===== Input sensor =====
+double angleY = 0;  // sudut (derajat) dari IMU
+double gyroY = 0;   // laju putar (°/s) dari gyro
+double angleX = 0;  // sudut (derajat) dari IMU
+double gyroX = 0;   // laju putar (°/s) dari gyro
+
+// ===== Setpoint =====
+double setPoint_roll = 0;  // target sudut (derajat)
+double setPoint_pitch = 0;
+int throttle = 0;  // throttle utama (untuk motor)
+
+// ===== Yaw Control =====
+double setPoint_yaw = 0;  // target yaw rate (°/s), bisa dari remote
+double error_rate_yaw, prevError_rate_yaw = 0;
+double integral_rate_yaw = 0;
+float kp_rate_yaw = 1.1, ki_rate_yaw = 0.1, kd_rate_yaw = 0.;
+unsigned long lastTime_rate_yaw;
+double pwmOut_yaw = 0;
+
+
+// ===== Outer Loop (Angle PID) =====
+double error_angle_roll, prevError_angle_roll = 0;
+double integral_angle_roll = 0;
+double kp_angle_roll = 5, ki_angle_roll = 0.001, kd_angle_roll = 0.01;
+unsigned long lastTime_angle_roll;
+float sampleTime_angle = 0.01;  // 100 Hz
+float rateTarget_roll = 0;      // output → target laju (°/s)
+
+double error_angle_pitch, prevError_angle_pitch = 0;
+double integral_angle_pitch = 0;
+float kp_angle_pitch = 5, ki_angle_pitch = 0.01, kd_angle_pitch = 0.01;
+unsigned long lastTime_angle_pitch;
+float rateTarget_pitch = 0;  // output → target laju (°/s)
+
+// ===== Inner Loop (Rate PID) =====
+double error_rate_roll, prevError_rate_roll = 0;
+double integral_rate_roll = 0;
+double kp_rate_roll = 1, ki_rate_roll = 0.01, kd_rate_roll = 0.04;
+unsigned long lastTime_rate_roll;
+float sampleTime_rate = 0.002;  // 500 Hz
+double integral_limit = 30;     // batas integral anti-windup
+double pwmOut_roll = 0;         // output → sinyal motor
+
+double error_rate_pitch, prevError_rate_pitch = 0;
+double integral_rate_pitch = 0;
+float kp_rate_pitch = 1, ki_rate_pitch = 0.01, kd_rate_pitch = 0.05;
+unsigned long lastTime_rate_pitch;
+double pwmOut_pitch = 0;
+
+// ===== Motor output (4 motor quad) =====
+double pwm_1 = 0, pwm_2 = 0, pwm_3 = 0, pwm_4 = 0;
+
+unsigned long lastSend = 0;
+unsigned long interval = 220;  // kirim tiap 200ms
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("test");
+
+  tuner.begin();
+  delay(1500);
+  mpuSetup();
+  motorSetup();
+}
+
+void loop() {
+  bacaSensor();
+  kirim_terimaData();
+  motorControl();
+  hitungPIDRateRoll(sensor_mpu.getGyroY(), hitungPIDAngleRoll(angleY));
+  hitungPIDRatePitch(sensor_mpu.getGyroX(), hitungPIDAnglePitch(angleX));
+  hitungPIDRateYaw(sensor_mpu.getGyroZ(), setPoint_yaw);
+
+  // motorTest();
+}
+
+void mpuSetup() {
+  Wire.begin(7, 6);
+  sensor_mpu.begin(3, 2);
+  sensor_mpu.upsideDownMounting = true;
+  sensor_mpu.setFilterGyroCoef(0.96);
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1A);
+  Wire.write(0x04);
+  Wire.endTransmission();
+  sensor_mpu.calcOffsets();
+  delay(1000);
+}
+
+void motorSetup() {
+  ledcAttach(1, 1500, 8);
+  ledcAttach(2, 1500, 8);
+  ledcAttach(3, 1500, 8);
+  ledcAttach(4, 1500, 8);
+}
+
+void bacaSensor() {
+  sensor_mpu.update();
+  angleY = -sensor_mpu.getAngleY();
+  angleX = -sensor_mpu.getAngleX();
+}
+
+void motorControl() {
+  int state = tuner.getMotorState();
+  pwm_1 = constrain(throttle - pwmOut_roll + pwmOut_yaw + u1, 0, batas);
+  pwm_2 = constrain(throttle + pwmOut_pitch - pwmOut_yaw + u3, 0, batas);
+  pwm_3 = constrain(throttle + pwmOut_roll + pwmOut_yaw + u2, 0, batas);
+  pwm_4 = constrain(throttle - pwmOut_pitch - pwmOut_yaw + u4, 0, batas);
+
+  if (state == 1) {
+    ledcWrite(1, pwm_1);  // Motor kanan (Right)
+    ledcWrite(2, pwm_2);  // Motor kanan (Atas)
+    ledcWrite(3, pwm_3);  // Motor kiri (Left)
+    ledcWrite(4, pwm_4);  // Motor kanan (Bawah)
+  } else {
+    ledcWrite(1, 0);  // Motor kanan (Right)
+    ledcWrite(2, 0);  // Motor kanan (Atas)
+    ledcWrite(3, 0);  // Motor kiri (Left)
+    ledcWrite(4, 0);  // Motor kanan (Bawah)
+  }
+}
+
+void motorTest() {
+  ledcWrite(1, 200);  // Motor kanan (Right)
+  ledcWrite(3, 200);  // Motor kiri (Left)
+}
+
+void kirim_terimaData() {
+  if (millis() - lastSend > interval) {
+    tuner.sendAngle_roll(angleY);
+    tuner.sendAngle_pitch(angleX);
+    tuner.sendPWM_1(pwm_1);
+    tuner.sendPWM_2(pwm_2);
+    tuner.sendPWM_3(pwm_3);
+    tuner.sendPWM_4(pwm_4);
+
+    throttle = tuner.getThrottle();
+    // kp_angle_yaw = tuner.getYawP();
+    // ki_angle_yaw = tuner.getYawI();
+    // kd_angle_yaw = tuner.getYawD();
+    kp_angle_pitch = tuner.getPitchP();
+    ki_angle_pitch = tuner.getPitchI();
+    kd_angle_pitch = tuner.getPitchD();
+    kp_angle_roll = tuner.getRollP();
+    ki_angle_roll = tuner.getRollI();
+    kd_angle_roll = tuner.getRollD();
+
+    kp_rate_yaw = tuner.getYawInnerP();
+    ki_rate_yaw = tuner.getYawInnerI();
+    kd_rate_yaw = tuner.getYawInnerD();
+    kp_rate_pitch = tuner.getPitchInnerP();
+    ki_rate_pitch = tuner.getPitchInnerI();
+    kd_rate_pitch = tuner.getPitchInnerD();
+    kp_rate_roll = tuner.getRollInnerP();
+    ki_rate_roll = tuner.getRollInnerI();
+    kd_rate_roll = tuner.getRollInnerD();
+
+    lastSend = millis();
+  }
+}
+
+// ===== Outer Loop: Angle Control =====
+float hitungPIDAngleRoll(float angleY) {
+  unsigned long now = millis();
+  float dt = (now - lastTime_angle_roll) / 1000.0;
+
+  if (dt >= sampleTime_angle) {
+    float error = setPoint_roll - angleY;
+
+    float P = kp_angle_roll * error;
+    integral_angle_roll += error * dt;
+
+    // Anti-windup
+    if (integral_angle_roll > integral_limit) integral_angle_roll = integral_limit;
+    if (integral_angle_roll < -integral_limit) integral_angle_roll = -integral_limit;
+
+    float I = ki_angle_roll * integral_angle_roll;
+    float D = kd_angle_roll * ((error - prevError_angle_roll) / dt);
+
+    rateTarget_roll = P + I + D;
+
+    // Batas rate target
+    if (rateTarget_roll > 200) rateTarget_roll = 200;
+    if (rateTarget_roll < -200) rateTarget_roll = -200;
+
+    prevError_angle_roll = error;
+    lastTime_angle_roll = now;
+  }
+
+  return rateTarget_roll;
+}
+
+float hitungPIDAnglePitch(float angleX) {
+  unsigned long now = millis();
+  float dt = (now - lastTime_angle_pitch) / 1000.0;
+
+  if (dt >= sampleTime_angle) {
+    float error = setPoint_pitch - angleX;
+
+    float P = kp_angle_pitch * error;
+    integral_angle_pitch += error * dt;
+    // Anti-windup
+    if (integral_angle_pitch > integral_limit) integral_angle_pitch = integral_limit;
+    if (integral_angle_pitch < -integral_limit) integral_angle_pitch = -integral_limit;
+
+    float I = ki_angle_pitch * integral_angle_pitch;
+    float D = kd_angle_pitch * ((error - prevError_angle_pitch) / dt);
+
+    rateTarget_pitch = P + I + D;
+
+    if (rateTarget_pitch > 200) rateTarget_pitch = 200;
+    if (rateTarget_pitch < -200) rateTarget_pitch = -200;
+
+    prevError_angle_pitch = error;
+    lastTime_angle_pitch = now;
+  }
+
+  return rateTarget_pitch;
+}
+
+void hitungPIDRateYaw(float gyroZ, float setPoint_yaw) {
+  unsigned long now = millis();
+  float dt = (now - lastTime_rate_yaw) / 1000.0;
+
+  if (dt >= sampleTime_rate) {
+    float error = setPoint_yaw - gyroZ;
+
+    float P = kp_rate_yaw * error;
+    integral_rate_yaw += error * dt;
+
+    // Anti-windup
+    if (integral_rate_yaw > integral_limit) integral_rate_yaw = integral_limit;
+    if (integral_rate_yaw < -integral_limit) integral_rate_yaw = -integral_limit;
+
+    float I = ki_rate_yaw * integral_rate_yaw;
+    float D = kd_rate_yaw * ((error - prevError_rate_yaw) / dt);
+
+    pwmOut_yaw = P + I + D;
+
+    if (pwmOut_yaw > 200) pwmOut_yaw = 200;
+    if (pwmOut_yaw < -200) pwmOut_yaw = -200;
+
+    prevError_rate_yaw = error;
+    lastTime_rate_yaw = now;
+  }
+}
+
+
+// ===== Inner Loop: Rate Control =====
+void hitungPIDRateRoll(float gyroY, float rateTarget_roll) {
+  unsigned long now = millis();
+  float dt = (now - lastTime_rate_roll) / 1000.0;
+
+  if (dt >= sampleTime_rate) {
+    float error = rateTarget_roll - gyroY;
+
+    float P = kp_rate_roll * error;
+    integral_rate_roll += error * dt;
+
+    // Anti-windup
+    if (integral_rate_roll > integral_limit) integral_rate_roll = integral_limit;
+    if (integral_rate_roll < -integral_limit) integral_rate_roll = -integral_limit;
+
+    float I = ki_rate_roll * integral_rate_roll;
+    float D = kd_rate_roll * ((error - prevError_rate_roll) / dt);
+
+    pwmOut_roll = P + I + D;
+
+    if (pwmOut_roll > 200) pwmOut_roll = 200;
+    if (pwmOut_roll < -200) pwmOut_roll = -200;
+
+    prevError_rate_roll = error;
+    lastTime_rate_roll = now;
+  }
+}
+
+void hitungPIDRatePitch(float gyroX, float rateTarget_pitch) {
+  unsigned long now = millis();
+  float dt = (now - lastTime_rate_pitch) / 1000.0;
+
+  if (dt >= sampleTime_rate) {
+    float error = rateTarget_pitch - gyroX;
+
+    float P = kp_rate_pitch * error;
+    integral_rate_pitch += error * dt;
+    // Anti-windup
+    if (integral_rate_pitch > integral_limit) integral_rate_pitch = integral_limit;
+    if (integral_rate_pitch < -integral_limit) integral_rate_pitch = -integral_limit;
+
+    float I = ki_rate_pitch * integral_rate_pitch;
+    float D = kd_rate_pitch * ((error - prevError_rate_pitch) / dt);
+
+    pwmOut_pitch = P + I + D;
+
+    if (pwmOut_pitch > 200) pwmOut_pitch = 200;
+    if (pwmOut_pitch < -200) pwmOut_pitch = -200;
+
+    prevError_rate_pitch = error;
+    lastTime_rate_pitch = now;
+  }
+}
+
+void motorState() {
+  int state = tuner.getMotorState();
+  Serial.println(state);
+  if (state == 0) {
+    pwm_1 = 0;
+    pwm_2 = 0;
+    pwm_3 = 0;
+    pwm_4 = 0;
+    integral_limit = 0;
+  } else {
+    integral_limit = 30;
+  }
+}
